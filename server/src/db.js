@@ -205,4 +205,20 @@ if (db.pragma('user_version', { simple: true }) < 4) {
   db.pragma('user_version = 4');
 }
 
+// schema 迁移：v4 → v5，feeds 表加 emoji/note/tags（投喂功能升级）
+if (db.pragma('user_version', { simple: true }) < 5) {
+  console.log('[DB] 迁移 v5: feeds 加 emoji/note/tags');
+  const feedCols = db.prepare("PRAGMA table_info(feeds)").all().map((c) => c.name);
+  if (!feedCols.includes('emoji')) {
+    db.exec("ALTER TABLE feeds ADD COLUMN emoji TEXT");
+  }
+  if (!feedCols.includes('note')) {
+    db.exec("ALTER TABLE feeds ADD COLUMN note TEXT");
+  }
+  if (!feedCols.includes('tags')) {
+    db.exec("ALTER TABLE feeds ADD COLUMN tags TEXT"); // 逗号分隔的标签字符串
+  }
+  db.pragma('user_version = 5');
+}
+
 export default db;

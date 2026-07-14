@@ -7,6 +7,27 @@ router.use(authRequired);
 
 const VALID_TYPES = ['breakfast', 'lunch', 'dinner', 'supper'];
 
+// emoji 校验：单字符（含组合 emoji），最多 2 码点
+function sanitizeEmoji(e) {
+  if (typeof e !== 'string') return null;
+  const t = e.trim();
+  if (!t) return null;
+  return t.slice(0, 2);
+}
+
+// tags 数组 → 逗号分隔字符串
+function tagsToCsv(tags) {
+  if (!Array.isArray(tags)) return null;
+  const list = tags.filter((t) => typeof t === 'string' && t.length <= 10).slice(0, 10);
+  return list.length ? list.join(',') : null;
+}
+
+// csv → tags 数组
+function csvToTags(csv) {
+  if (!csv) return [];
+  return csv.split(',').filter(Boolean);
+}
+
 // 收到的投喂列表（按时间倒序），含投喂人用户名，支持分页
 router.get('/', (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
@@ -19,12 +40,14 @@ router.get('/', (req, res) => {
     LIMIT ? OFFSET ?
   `).all(req.user.id, limit, offset);
   const total = db.prepare('SELECT COUNT(*) AS c FROM feeds WHERE to_user_id = ?').get(req.user.id).c;
-  res.json({ feeds: rows, total });
+  // 把 tags csv 转成数组
+  const result = rows.map((r) => ({ ...r, tags: csvToTags(r.tags) }));
+  res.json({ feeds: result, total });
 });
 
 // 投喂好友：按用户名指定，校验是否为已接受好友
 router.post('/', (req, res) => {
-  const { to_username, meal_name, meal_type, message } = req.body;
+  const { to_username, meal_name, meal_type, message, emoji, note, tags } = req.body;
   if (!to_username || typeof to_username !== 'string' || !to_username.trim()) {
     return res.status(400).json({ error: '请选择要投喂的好友' });
   }
@@ -59,12 +82,19 @@ router.post('/', (req, res) => {
     return res.status(403).json({ error: '只能投喂已添加的好友' });
   }
 
+  const emojiVal = sanitizeEmoji(emoji);
+  const noteVal = typeof note === 'string' ? note.trim().slice(0, 100) : null;
+  const tagsCsv = tagsToCsv(tags);
+
   const info = db.prepare(`
-    INSERT INTO feeds (from_user_id, to_user_id, meal_name, meal_type, message)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(req.user.id, target.id, meal_name.trim(), meal_type || null, (message || '').trim() || null);
+    INSERT INTO feeds (from_user_id, to_user_id, meal_name, meal_type, message, emoji, note, tags)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    req.user.id, target.id, meal_name.trim(), meal_type || null,
+    (message || '').trim() || null, emojiVal, noteVal, tagsCsv
+  );
   const feed = db.prepare('SELECT * FROM feeds WHERE id = ?').get(info.lastInsertRowid);
-  res.json({ ok: true, feed });
+  res.json({ ok: true, feed: { ...feed, tags: csvToTags(feed.tags) } });
 });
 
 // 更新投喂状态（照吃 / 不吃），同时记录 updated_at

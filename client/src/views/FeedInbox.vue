@@ -3,8 +3,11 @@ import { ref, computed, onMounted, onUnmounted, onActivated } from 'vue';
 import { useRoute } from 'vue-router';
 import http from '../api/index.js';
 import EmptyState from '../components/EmptyState.vue';
+import EmojiPicker from '../components/EmojiPicker.vue';
+import TagPicker from '../components/TagPicker.vue';
 import { useToast } from '../composables/useToast.js';
 import { getMealType, MEAL_TYPE_LIST } from '../constants/meal.js';
+import { DEFAULT_EMOJI } from '../constants/emoji.js';
 
 defineOptions({ name: 'FeedInbox' });
 
@@ -13,21 +16,40 @@ const { show: showToast } = useToast();
 
 const feeds = ref([]);
 const friends = ref([]);
+const myMeals = ref([]);
 const loading = ref(false);
 const processingIds = ref(new Set());
 
 // 投喂表单
 const showSend = ref(false);
 const sendTo = ref('');
+const sendMode = ref('pick'); // 'pick' 从餐库选 | 'custom' 自定义
 const sendMealName = ref('');
 const sendMealType = ref('');
+const sendEmoji = ref('');
+const sendNote = ref('');
+const sendTags = ref([]);
 const sendMessage = ref('');
 const sending = ref(false);
+
+// 餐库选择面板：按餐类折叠
+const expandedTypes = ref({});
 
 let pollTimer = null;
 
 const pending = computed(() => feeds.value.filter((f) => f.status === 'pending'));
 const handled = computed(() => feeds.value.filter((f) => f.status !== 'pending'));
+
+// 我的餐库按餐类分组
+const groupedMyMeals = computed(() => {
+  const groups = {};
+  for (const t of MEAL_TYPE_LIST) groups[t.key] = [];
+  for (const m of myMeals.value) {
+    if (!groups[m.meal_type]) groups[m.meal_type] = [];
+    groups[m.meal_type].push(m);
+  }
+  return groups;
+});
 
 // 兼容 Safari：把 "YYYY-MM-DD HH:MM:SS" 转 "YYYY-MM-DDTHH:MM:SSZ"
 function timeAgo(ts) {
@@ -63,6 +85,36 @@ async function load() {
   }
 }
 
+async function loadMyMeals() {
+  try {
+    const data = await http.get('/meals');
+    myMeals.value = data.meals || [];
+    // 默认展开有内容的餐类
+    const init = {};
+    for (const t of MEAL_TYPE_LIST) {
+      if ((groupedMyMeals.value[t.key] || []).length > 0) init[t.key] = false;
+    }
+    expandedTypes.value = init;
+  } catch (e) {
+    /* 静默 */
+  }
+}
+
+function toggleType(key) {
+  expandedTypes.value[key] = !expandedTypes.value[key];
+}
+
+// 从餐库选一道菜，填入表单
+function pickFromMeals(m) {
+  sendMealName.value = m.name;
+  sendMealType.value = m.meal_type;
+  sendEmoji.value = m.emoji || '';
+  sendNote.value = m.note || '';
+  sendTags.value = [...(m.tags || [])];
+  sendMode.value = 'custom'; // 切到自定义模式，让用户看到已填内容并补充留言
+  showToast(`已选「${m.name}」，可补充留言后发送`);
+}
+
 async function updateStatus(feed, status) {
   if (processingIds.value.has(feed.id)) return;
   processingIds.value.add(feed.id);
@@ -92,6 +144,15 @@ async function deleteFeed(feed) {
   }
 }
 
+function resetForm() {
+  sendMealName.value = '';
+  sendMealType.value = '';
+  sendEmoji.value = '';
+  sendNote.value = '';
+  sendTags.value = [];
+  sendMessage.value = '';
+}
+
 async function sendFeed() {
   if (sending.value) return;
   if (!sendTo.value) {
@@ -108,12 +169,13 @@ async function sendFeed() {
       to_username: sendTo.value,
       meal_name: sendMealName.value.trim(),
       meal_type: sendMealType.value || undefined,
-      message: sendMessage.value.trim(),
+      message: sendMessage.value.trim() || undefined,
+      emoji: sendEmoji.value || undefined,
+      note: sendNote.value.trim() || undefined,
+      tags: sendTags.value.length ? sendTags.value : undefined,
     });
     showToast('投喂成功！');
-    sendMealName.value = '';
-    sendMessage.value = '';
-    sendMealType.value = '';
+    resetForm();
     showSend.value = false;
   } catch (e) {
     showToast(e.message);
@@ -124,6 +186,7 @@ async function sendFeed() {
 
 onMounted(() => {
   load();
+  loadMyMeals();
   // 每 30 秒轮询投喂列表
   pollTimer = setInterval(load, 30000);
 });
@@ -131,6 +194,7 @@ onMounted(() => {
 onActivated(() => {
   // keep-alive 重新激活时刷新
   load();
+  loadMyMeals();
 });
 
 onUnmounted(() => {
@@ -160,29 +224,103 @@ onUnmounted(() => {
           </div>
           <div v-if="friends.length === 0" class="hint">还没有好友，先去添加一位吧</div>
           <template v-else>
-            <div class="input-group">
-              <label class="input-label">指定吃什么</label>
-              <input v-model="sendMealName" class="input" placeholder="例如：黄焖鸡米饭" maxlength="30" />
+            <!-- 模式切换 -->
+            <div class="mode-tabs">
+              <button
+                class="mode-tab"
+                :class="{ active: sendMode === 'pick' }"
+                @click="sendMode = 'pick'"
+              >📋 从餐库选</button>
+              <button
+                class="mode-tab"
+                :class="{ active: sendMode === 'custom' }"
+                @click="sendMode = 'custom'"
+              >✏️ 自定义添加</button>
             </div>
-            <div class="input-group">
-              <label class="input-label">餐类（可选）</label>
-              <div class="type-row">
-                <button
+
+            <!-- 从餐库选模式 -->
+            <div v-if="sendMode === 'pick'" class="pick-panel">
+              <div v-if="myMeals.length === 0" class="hint">
+                你的餐库还是空的，先去「我的餐库」添加菜品
+              </div>
+              <div v-else>
+                <div
                   v-for="t in MEAL_TYPE_LIST"
                   :key="t.key"
-                  class="type-chip"
-                  :class="{ active: sendMealType === t.key }"
-                  @click="sendMealType = sendMealType === t.key ? '' : t.key"
-                >{{ t.emoji }} {{ t.label }}</button>
+                  v-show="(groupedMyMeals[t.key] || []).length > 0"
+                  class="meal-group"
+                >
+                  <div class="group-header" @click="toggleType(t.key)">
+                    <span class="gh-emoji">{{ t.emoji }}</span>
+                    <span class="gh-name">{{ t.label }}</span>
+                    <span class="gh-count">{{ (groupedMyMeals[t.key] || []).length }}</span>
+                    <span class="gh-arrow" :class="{ open: expandedTypes[t.key] }">›</span>
+                  </div>
+                  <transition name="expand">
+                    <div v-if="expandedTypes[t.key]" class="group-body">
+                      <button
+                        v-for="m in groupedMyMeals[t.key]"
+                        :key="m.id"
+                        class="meal-pick-btn"
+                        @click="pickFromMeals(m)"
+                      >
+                        <span class="mp-emoji">{{ m.emoji || DEFAULT_EMOJI[t.key] }}</span>
+                        <div class="mp-info">
+                          <div class="mp-name">{{ m.name }}</div>
+                          <div v-if="m.note" class="mp-note">{{ m.note }}</div>
+                        </div>
+                        <span v-if="m.tags && m.tags.length" class="mp-tags">
+                          {{ m.tags.slice(0, 2).join(' · ') }}
+                        </span>
+                      </button>
+                    </div>
+                  </transition>
+                </div>
               </div>
             </div>
-            <div class="input-group">
-              <label class="input-label">留言（可选）</label>
-              <input v-model="sendMessage" class="input" placeholder="说点什么…" maxlength="50" />
+
+            <!-- 自定义模式 -->
+            <div v-if="sendMode === 'custom'" class="custom-panel">
+              <div class="input-group">
+                <label class="input-label">菜品名</label>
+                <input v-model="sendMealName" class="input" placeholder="例如：黄焖鸡米饭" maxlength="30" />
+              </div>
+              <div class="input-group">
+                <label class="input-label">餐类（可选）</label>
+                <div class="type-row">
+                  <button
+                    v-for="t in MEAL_TYPE_LIST"
+                    :key="t.key"
+                    class="type-chip"
+                    :class="{ active: sendMealType === t.key }"
+                    @click="sendMealType = sendMealType === t.key ? '' : t.key"
+                  >{{ t.emoji }} {{ t.label }}</button>
+                </div>
+              </div>
+              <div class="input-group">
+                <label class="input-label">emoji 图标（可选）</label>
+                <EmojiPicker v-model="sendEmoji" />
+              </div>
+              <div class="input-group">
+                <label class="input-label">备注（可选）</label>
+                <input v-model="sendNote" class="input" placeholder="店家 / 价格 / 做法 / 推荐理由…" maxlength="100" />
+              </div>
+              <div class="input-group">
+                <label class="input-label">标签（可选）</label>
+                <TagPicker v-model="sendTags" />
+              </div>
+              <div class="input-group">
+                <label class="input-label">留言（可选）</label>
+                <input v-model="sendMessage" class="input" placeholder="说点什么…" maxlength="50" />
+              </div>
             </div>
-            <button class="btn btn-block" :disabled="sending" @click="sendFeed">
-              {{ sending ? '发送中…' : '发送投喂' }}
-            </button>
+
+            <button
+              v-if="sendMode === 'custom'"
+              class="btn btn-block"
+              :disabled="sending"
+              @click="sendFeed"
+            >{{ sending ? '发送中…' : '发送投喂' }}</button>
           </template>
         </div>
       </transition>
@@ -204,11 +342,15 @@ onUnmounted(() => {
             >✕</button>
           </div>
           <div class="feed-meal">
-            <span class="meal-emoji">{{ getMealType(f.meal_type).emoji }}</span>
+            <span class="meal-emoji">{{ f.emoji || getMealType(f.meal_type).emoji }}</span>
             <div>
               <div class="meal-name">{{ f.meal_name }}</div>
               <div v-if="f.meal_type" class="meal-type">{{ getMealType(f.meal_type).label }}</div>
             </div>
+          </div>
+          <div v-if="f.note" class="feed-note">📝 {{ f.note }}</div>
+          <div v-if="f.tags && f.tags.length" class="feed-tags">
+            <span v-for="t in f.tags" :key="t" class="tag-chip">{{ t }}</span>
           </div>
           <div v-if="f.message" class="feed-msg">"{{ f.message }}"</div>
           <div class="feed-actions">
@@ -239,8 +381,15 @@ onUnmounted(() => {
             <span class="status-tag" :class="f.status">{{ f.status === 'eaten' ? '已吃' : '没吃' }}</span>
           </div>
           <div class="feed-meal">
-            <span class="meal-emoji">{{ getMealType(f.meal_type).emoji }}</span>
-            <div class="meal-name">{{ f.meal_name }}</div>
+            <span class="meal-emoji">{{ f.emoji || getMealType(f.meal_type).emoji }}</span>
+            <div>
+              <div class="meal-name">{{ f.meal_name }}</div>
+              <div v-if="f.meal_type" class="meal-type">{{ getMealType(f.meal_type).label }}</div>
+            </div>
+          </div>
+          <div v-if="f.note" class="feed-note">📝 {{ f.note }}</div>
+          <div v-if="f.tags && f.tags.length" class="feed-tags">
+            <span v-for="t in f.tags" :key="t" class="tag-chip">{{ t }}</span>
           </div>
           <div v-if="f.message" class="feed-msg">"{{ f.message }}"</div>
           <button
@@ -288,24 +437,162 @@ onUnmounted(() => {
   from { opacity: 0; transform: translateY(-8px); }
   to { opacity: 1; transform: translateY(0); }
 }
+.input-group {
+  margin-bottom: 14px;
+}
+.input-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-light);
+  margin-bottom: 6px;
+}
 .hint {
   color: var(--text-light);
   font-size: 13px;
   text-align: center;
   padding: 10px;
 }
-.type-row {
+.mode-tabs {
   display: flex;
-  gap: 8px;
+  gap: 6px;
+  margin-bottom: 14px;
+  background: var(--bg-card);
+  padding: 4px;
+  border-radius: 12px;
 }
-.type-chip {
+.mode-tab {
   flex: 1;
   padding: 8px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-light);
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.15s;
+}
+.mode-tab.active {
+  background: var(--primary);
+  color: #fff;
+}
+/* 餐库折叠分组 */
+.meal-group {
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  background: var(--primary-soft);
+  cursor: pointer;
+  user-select: none;
+}
+.gh-emoji {
+  font-size: 18px;
+}
+.gh-name {
+  font-size: 14px;
+  font-weight: 600;
+  flex: 1;
+}
+.gh-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-light);
+  background: var(--bg-card);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.gh-arrow {
+  font-size: 18px;
+  color: var(--text-light);
+  transition: transform 0.2s;
+}
+.gh-arrow.open {
+  transform: rotate(90deg);
+}
+.group-body {
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.meal-pick-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--bg-card);
+  text-align: left;
+  width: 100%;
+  transition: background 0.15s;
+}
+.meal-pick-btn:active {
+  background: var(--primary-soft);
+}
+.mp-emoji {
+  font-size: 22px;
+  flex-shrink: 0;
+}
+.mp-info {
+  flex: 1;
+  min-width: 0;
+}
+.mp-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.mp-note {
+  font-size: 11px;
+  color: var(--text-light);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-tags {
+  font-size: 10px;
+  color: var(--text-light);
+  background: var(--primary-soft);
+  padding: 2px 6px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+/* 展开/收起动画 */
+.expand-enter-active, .expand-leave-active {
+  transition: all 0.2s ease;
+  overflow: hidden;
+}
+.expand-enter-from, .expand-leave-to {
+  opacity: 0;
+  max-height: 0;
+}
+.expand-enter-to, .expand-leave-from {
+  opacity: 1;
+  max-height: 600px;
+}
+.type-row {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.type-row::-webkit-scrollbar { display: none; }
+.type-chip {
+  flex-shrink: 0;
+  padding: 8px 12px;
   border-radius: 10px;
   background: var(--primary-soft);
   color: var(--text-light);
   font-size: 13px;
   font-weight: 600;
+  white-space: nowrap;
   transition: all 0.15s;
 }
 .type-chip.active {
@@ -371,7 +658,7 @@ onUnmounted(() => {
   background: var(--primary-soft);
   border-radius: 10px;
   padding: 12px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 .meal-emoji {
   font-size: 28px;
@@ -388,6 +675,27 @@ onUnmounted(() => {
   font-size: 11px;
   color: var(--text-light);
   margin-top: 2px;
+}
+.feed-note {
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 8px;
+  padding: 0 2px;
+  line-height: 1.5;
+}
+.feed-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.tag-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  font-weight: 500;
 }
 .feed-msg {
   font-size: 13px;
