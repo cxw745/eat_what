@@ -100,6 +100,18 @@ async function sendComment() {
   }
 }
 
+async function deleteComment(c) {
+  if (!confirm('删除这条评论？')) return;
+  try {
+    await http.delete(`/posts/${props.post.id}/comments/${c.id}`);
+    comments.value = comments.value.filter((x) => x.id !== c.id);
+    props.post.comment_count = Math.max(0, (props.post.comment_count || 0) - 1);
+    showToast('已删除');
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
 async function deletePost() {
   if (!confirm('确定删除这条动态？')) return;
   try {
@@ -206,6 +218,11 @@ function onClickUser() {
           <div v-for="c in comments" :key="c.id" class="comment-item">
             <span class="c-user" @click="$emit('click-user', c.username)">{{ c.username }}:</span>
             <span class="c-text">{{ c.content }}</span>
+            <button
+              v-if="c.username === currentUsername"
+              class="c-del"
+              @click="deleteComment(c)"
+            >删除</button>
           </div>
         </div>
         <div class="comment-input">
@@ -416,6 +433,9 @@ function onClickUser() {
   font-size: 13px;
   line-height: 1.6;
   margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 .c-user {
   color: var(--primary-dark);
@@ -425,6 +445,19 @@ function onClickUser() {
 }
 .c-text {
   color: var(--text);
+  flex: 1;
+}
+.c-del {
+  font-size: 11px;
+  color: var(--text-light);
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-card);
+  flex-shrink: 0;
+}
+.c-del:active {
+  background: var(--danger);
+  color: #fff;
 }
 .comment-input {
   display: flex;

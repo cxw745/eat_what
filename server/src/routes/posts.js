@@ -189,4 +189,19 @@ router.post('/:id/comments', authRequired, (req, res) => {
   res.json({ comment });
 });
 
+// 删除评论（仅评论作者本人）
+router.delete('/:id/comments/:commentId', authRequired, (req, res) => {
+  const { id, commentId } = req.params;
+  const row = db.prepare('SELECT * FROM post_comments WHERE id = ? AND post_id = ?').get(commentId, id);
+  if (!row) {
+    return res.status(404).json({ error: '评论不存在' });
+  }
+  // 仅评论作者可删除（动态作者也可删自己动态下的评论，按需扩展）
+  if (row.user_id !== req.user.id) {
+    return res.status(403).json({ error: '只能删除自己的评论' });
+  }
+  db.prepare('DELETE FROM post_comments WHERE id = ?').run(commentId);
+  res.json({ ok: true });
+});
+
 export default router;

@@ -255,7 +255,7 @@ onUnmounted(() => {
             <label class="input-label">选好友</label>
             <select v-model="selectedFriend" class="input">
               <option :value="null" disabled>请选择…</option>
-              <option v-for="f in friends" :key="f.id" :value="f.id">{{ f.username }}</option>
+              <option v-for="f in friends" :key="f.user_id" :value="f.user_id">{{ f.username }}</option>
             </select>
           </div>
 

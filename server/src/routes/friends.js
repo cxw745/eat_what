@@ -84,27 +84,33 @@ router.delete('/:id', (req, res) => {
 });
 
 // 查看好友餐库（仅 accepted 好友）
+// :id 是好友的用户 id（不是 friends 表 id）
 router.get('/:id/meals', (req, res) => {
-  const { id } = req.params;
-  // 校验是否为已接受好友，且对方是 id 对应用户（id 可能是 friend_id 或 user_id）
+  const friendUserId = parseInt(req.params.id, 10);
+  if (!friendUserId) {
+    return res.status(400).json({ error: '参数非法' });
+  }
+  // 校验是否为已接受好友
   const friendship = db.prepare(`
     SELECT * FROM friends
-    WHERE id = ? AND status = 'accepted'
-    AND (user_id = ? OR friend_id = ?)
-  `).get(id, req.user.id, req.user.id);
+    WHERE status = 'accepted'
+    AND ((user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?))
+  `).get(req.user.id, friendUserId, friendUserId, req.user.id);
   if (!friendship) {
     return res.status(403).json({ error: '不是好友，无法查看' });
   }
-  // 找出好友的用户 id
-  const friendUserId = friendship.user_id === req.user.id ? friendship.friend_id : friendship.user_id;
   const friend = db.prepare('SELECT id, username FROM users WHERE id = ?').get(friendUserId);
   const meals = db.prepare('SELECT * FROM meals WHERE user_id = ? ORDER BY id DESC').all(friendUserId);
   res.json({ friend, meals });
 });
 
 // 从好友餐库随机抽一道
+// :id 是好友的用户 id（不是 friends 表 id）
 router.get('/:id/random', (req, res) => {
-  const { id } = req.params;
+  const friendUserId = parseInt(req.params.id, 10);
+  if (!friendUserId) {
+    return res.status(400).json({ error: '参数非法' });
+  }
   const { meal_type } = req.query;
   const VALID_TYPES = ['breakfast', 'lunch', 'dinner', 'supper'];
   if (meal_type && !VALID_TYPES.includes(meal_type)) {
@@ -112,22 +118,41 @@ router.get('/:id/random', (req, res) => {
   }
   const friendship = db.prepare(`
     SELECT * FROM friends
-    WHERE id = ? AND status = 'accepted'
-    AND (user_id = ? OR friend_id = ?)
-  `).get(id, req.user.id, req.user.id);
+    WHERE status = 'accepted'
+    AND ((user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?))
+  `).get(req.user.id, friendUserId, friendUserId, req.user.id);
   if (!friendship) {
     return res.status(403).json({ error: '不是好友，无法抽取' });
   }
-  const friendUserId = friendship.user_id === req.user.id ? friendship.friend_id : friendship.user_id;
   const friend = db.prepare('SELECT id, username FROM users WHERE id = ?').get(friendUserId);
 
   const meal = meal_type
-    ? db.prepare('SELECT * FROM meals WHERE user_id = ? AND meal_type = ? ORDER BY RANDOM() LIMIT 1').get(friendUserId, meal_type)
-    : db.prepare('SELECT * FROM meals WHERE user_id = ? ORDER BY RANDOM() LIMIT 1').get(friendUserId);
+    ? db.prepare(`
+        SELECT m.*,
+          (SELECT GROUP_CONCAT(tag, ',') FROM meal_tags WHERE meal_id = m.id) AS tags_csv
+        FROM meals m WHERE m.user_id = ? AND m.meal_type = ?
+        ORDER BY RANDOM() LIMIT 1
+      `).get(friendUserId, meal_type)
+    : db.prepare(`
+        SELECT m.*,
+          (SELECT GROUP_CONCAT(tag, ',') FROM meal_tags WHERE meal_id = m.id) AS tags_csv
+        FROM meals m WHERE m.user_id = ?
+        ORDER BY RANDOM() LIMIT 1
+      `).get(friendUserId);
   if (!meal) {
     return res.status(404).json({ error: `${friend.username} 的餐库还是空的` });
   }
-  res.json({ friend, meal });
+  // 记录抽奖历史（来源：好友）
+  const mealNorm = {
+    ...meal,
+    tags: meal.tags_csv ? meal.tags_csv.split(',') : [],
+    tags_csv: undefined,
+  };
+  db.prepare(`
+    INSERT INTO pick_history (user_id, meal_id, meal_name, meal_type, emoji, source, from_username)
+    VALUES (?, ?, ?, ?, ?, 'friend', ?)
+  `).run(req.user.id, mealNorm.id, mealNorm.name, mealNorm.meal_type, mealNorm.emoji || null, friend.username);
+  res.json({ friend, meal: mealNorm });
 });
 
 export default router;
